@@ -78,6 +78,24 @@ const LEVEL_DATA = {
         // Levels 1-3 paint markers 1, 1-2 and 1-2-3 — each field carries what
         // the ones before it grew, plus its own. The last one named is the new
         // one, and the one that reaches the roster.
+         { FILE: 'maps/levels/orchard/orchard_01.tmj', CROPS: { 1: 'mango' } },
+        { FILE: 'maps/levels/orchard/orchard_01.tmj', CROPS: { 1: 'mango' } },
+        { FILE: 'maps/levels/orchard/orchard_01.tmj', CROPS: { 1: 'mango' } },
+        { FILE: 'maps/levels/orchard/orchard_01.tmj', CROPS: { 1: 'mango' } },
+
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+        //orchard levels
+        { FILE: 'maps/levels/orchard/orchard_01.tmj', CROPS: { 1: 'mango' } },
+        { FILE: 'maps/levels/orchard/orchard_02.tmj', CROPS: { 1: 'mango', 2:"cherry" } },
+        { FILE: 'maps/levels/orchard/orchard_03.tmj', CROPS: { 1: 'mango', 2:"cherry", 3:"banana" } },
+        { FILE: 'maps/levels/orchard/orchard_04.tmj', CROPS: { 1: 'mango', 2:"cherry", 3:"banana", 4:"orange" } },
+        { FILE: 'maps/levels/orchard/orchard_05.tmj', CROPS: { 1: 'mango', 2:"cherry", 3:"banana", 4:"orange", 5:"pomegranate" } },
 
 
         { FILE: 'maps/levels/vegetable/vegetable_01.tmj', CROPS: { 1: 'tomato' } },

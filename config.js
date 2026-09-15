@@ -97,7 +97,12 @@ var CONFIG = {
     DEBUG_PERF: true,        // log object / tween / timer / texture counts each
                              // time the world rebases (once per level). Climbing
                              // numbers = something is outliving its band
-    BATTERY_START_LEVEL: 50,
+    // The hammer the run starts on. It was 50 — a dev shortcut for jumping up
+    // the battery ladder — which now hands you 125,000,000 damage a strike
+    // against a level-1 block of 25, so the first three farms vanish before
+    // they are seen. At 1 a strike does 5 and level 1's blocks take 5, 10 and
+    // 20 hits. Put it back to 50 to test the art at the top of the sheet.
+    BATTERY_START_LEVEL: 1,
     BATTERY_IMAGE_EXTENSIONS: ['svg', 'png', 'jpg', 'webp'],
 
     // BACKGROUND: {
@@ -1241,6 +1246,360 @@ var CONFIG = {
             LEVEL_COST: LEVEL_DATA.COST,
             COST_SCALE: LEVEL_DATA.COST_SCALE,
             STRETCHES:  LEVEL_DATA.STRETCHES,
+
+            // ══ THE BLOCKS ══════════════════════════════════════════════
+            // What the game is now about. The canal is BUILT — fully drawn from
+            // the first frame — and what stops the water is a set of walls
+            // standing in it. Three per level, broken by three hammers.
+            //
+            // This replaces the trencher entirely. The old model had a machine
+            // CUT the canal and the water follow the blade, so progress was a
+            // distance and the batteries bought speed. Now the canal is a given,
+            // progress is three strengths falling to zero, and the hammers buy
+            // damage. LEVEL_COST above no longer drives anything — block
+            // strengths come from BLUMGI_HP instead, which is the same sheet
+            // split three ways rather than summed.
+            //
+            // ── WHY THREE, AND WHY IN PARALLEL ──────────────────────────
+            // Blumgi Merge's level is three independent fights that end when the
+            // SLOWEST finishes. Three blocks, each with its own hammer and its
+            // own strength, reproduces that exactly — which is why the three HP
+            // columns are the right source and the summed total is not.
+            //
+            // The SLOTS are the binding: slot 1 hammers block1, slot 2 block2,
+            // slot 3 block3. Left slot to the lowest block, in the order the
+            // water meets them. An empty slot means its block is not being hit
+            // at all, so leaving one empty stalls that fight and nothing else.
+            BLOCKS: {
+                ENABLED: true,
+                LAYER:   'block',       // the Tiled object layer they live on
+                // Markers are named for their number: block1, block2, block3.
+                // The digits are read off the end, so the prefix can be
+                // anything consistent.
+                PREFIX:  'block',
+
+                // ── Strength ────────────────────────────────────────────
+                // From BLUMGI_HP (blumgiHP.js): block1 takes HP1, block2 HP2,
+                // block3 HP3, for this level's row. The table is 64 rows and
+                // the level rotation wraps, so the row wraps with it.
+                //
+                // STRENGTH_SCALE multiplies all three, the way COST_SCALE used
+                // to multiply the total — the one knob for making the whole game
+                // faster or slower without touching a ratio anywhere.
+                STRENGTH_SCALE: 1,
+                // What a level falls back to if BLUMGI_HP has no row for it.
+                FALLBACK: [100, 200, 400],
+
+                // ── The art ─────────────────────────────────────────────
+                // graphics/block.png — the wall that used to dam the canal in
+                // the old water-holding mode, which nothing draws any more. It
+                // is already the right thing: a slab lying across the channel,
+                // drawn at the seam between the two main columns.
+                KEY:      'block',
+                WIDTH:    1.62,     // tiles across. 2.0 is the full width of the
+                                    // main canal exactly, so this is ~19% under
+                                    // it and the slab sits well inside the
+                                    // channel with bank showing either side.
+                                    // Height follows the art's aspect ratio, so
+                                    // it comes down in proportion on its own.
+                // ── WHERE THE SLAB SITS, AND WHERE THE WATER STOPS ──
+                // ONE POINT DOES BOTH, and that is the whole reason these two
+                // numbers are next to each other. The marker in the map is the
+                // sprite's PIVOT and it is also the waterline — so the art and
+                // the water cannot drift apart, whatever the slab is redrawn to
+                // look like.
+                //
+                // The art is a horizontal slab with a shadow cast below it, so
+                // its bottom edge is shadow rather than wall. Pinning the water
+                // to the bottom of the sprite left it stopping at the shadow —
+                // short of anything solid, with a visible gap between the water
+                // and the thing supposedly holding it.
+                //
+                // 0.25 puts the pivot a quarter of the way down from the TOP,
+                // which is in the slab's face. The water comes up to there, so
+                // the lower three quarters — shadow and most of the wall — is
+                // under water and the face stands proud of it. That reads as
+                // water pressing against a wall instead of stopping near one.
+                ORIGIN_Y: 0.25,     // pivot, as a fraction down the sprite
+                STOP_GAP: 0,        // tiles held back from the pivot. Zero: the
+                                    // marker IS the waterline. Raise it only to
+                                    // pull the water off the slab deliberately
+                // ── UNDER THE WATER, OVER THE DRY TRENCH ────────────
+                // The canal's bands are: dug trench 3.03, water 3.10, foam and
+                // shimmer just above that, main bridge 3.15.
+                //
+                // 3.06 puts the slab BETWEEN the trench and the water, which is
+                // the only place it can sit and read correctly at both ends. Its
+                // lower three quarters are below the waterline, so the water
+                // draws OVER them and the slab is genuinely submerged; its face,
+                // which stands in a cell the water has not filled, draws over
+                // the dry trench behind it.
+                //
+                // It was 3.11 — one hundredth above the water — and that put the
+                // whole slab in front, so the part that should have been under
+                // water sat on top of it looking dry and pasted on.
+                DEPTH:    3.06,
+
+                // ── Taking damage ───────────────────────────────────────
+                // A FLASH, AND NOTHING THAT MOVES. The slab used to sink into
+                // the channel and jolt sideways on every hit; that is how a
+                // crate answers a blow, and it made a wall wedged across a canal
+                // read as light and loose. It is meant to be immovable until it
+                // breaks, so it does not budge.
+                //
+                // The flash is a placeholder for a CRACK OVERLAY advancing with
+                // the damage — which also carries how far along you are, which
+                // no amount of shaking can.
+                HIT_MS:     90,     // how long the flash holds
+                HIT_TINT:   0xffd8c0,
+
+                // How broken it looks on the way down, as a tint from whole to
+                // nearly-destroyed. Strength is a number in the hundreds of
+                // billions; the only honest way to show it is a bar and a tint.
+                DAMAGE_TINT: 0x8a6a55,
+
+                // ── Breaking ────────────────────────────────────────────
+                BREAK_MS:      420,   // the shatter
+                BREAK_RISE:    0.5,   // tiles the pieces fly up
+                BREAK_SPIN:    0.6,   // radians they turn through
+                SHARDS:        7,     // pieces the slab comes apart into
+
+                // THE WATER WAITS FOR ALL OF THAT. Held for BREAK_MS plus this,
+                // so the shatter plays out completely before the canal moves.
+                // Without the hold the water climbed on the frame the last blow
+                // landed and ran up through the shards while they were still in
+                // the air — break and release became one muddled event instead
+                // of cause and effect.
+                //
+                // Raise it to put a beat between the wall going and the water
+                // coming; 0 releases the moment the last shard fades.
+                RELEASE_DELAY_MS: 0,
+
+                // ── The strength readout ────────────────────────────────
+                // Over each block: a bar and the number still to go. This is the
+                // player's only view of progress, so it is not optional.
+                // The bar is OFF and the figure stays — see _buildBlockBar.
+                // A strength of 27,900,000,000 moves a bar by nothing per hit;
+                // the number moves every time.
+                BAR: {
+                    ENABLED:  false,   // the green fill
+                    TEXT:     true,    // the figure still to go
+                    W:        1.8,     // tiles
+                    H:        0.17,
+                    Y:        -0.62,   // tiles above the block's centre
+                    BG:       0x2b1c12,
+                    FILL:     0x6fd44f,
+                    LOW:      0xd4543f,  // once it is nearly through
+                    LOW_AT:   0.25,
+                    RADIUS:   0.05,
+                    TEXT_SIZE: 17,
+                    TEXT_COLOR:  '#ffffff',
+                    TEXT_STROKE: '#1d2b16',
+                    TEXT_STROKE_W: 4,
+                    // OVER THE ACTORS — see HAMMER.DEPTH below for why 6.
+                    // A strength readout hidden behind a mango tree is no
+                    // readout, and it is the only view of progress there is.
+                    DEPTH:    6.2,
+                },
+            },
+
+            // ══ HAMMERING ═══════════════════════════════════════════════
+            // The hammer in a slot does not travel to its block — it appears
+            // BESIDE it and swings, the way a Minecraft block is mined: the tool
+            // hangs at the edge of the target, rocks back, and comes down.
+            //
+            // One strike per RATE_MS, each taking the hammer's full strike power
+            // off the block. Damage is dealt at the moment of IMPACT, not at the
+            // start of the swing, so the number and the picture agree.
+            HAMMER: {
+                ENABLED:  true,
+                RATE_MS:  1000,    // THE BEAT: one cycle a second, and one
+                                   // hammer's full strike power per cycle. This
+                                   // is the battery tick's beat, kept because
+                                   // the whole economy was tuned as
+                                   // damage-per-second — changing it changes the
+                                   // difficulty of every level at once
+
+                // ── BLOWS PER BEAT ─────────────────────────────────────
+                // The beat carries SEVERAL swings and only one of them scores.
+                // Damage per second is unchanged: STRIKES does not multiply what
+                // a hammer does, it only divides the beat into more of them.
+                //
+                // A single 90ms swing in a 1000ms beat left the hammer still for
+                // 91% of the time, reading as frozen-and-twitching rather than
+                // working. Minecraft decouples the swing from the damage tick —
+                // the pickaxe swings steadily while the crack advances on its
+                // own clock — and this is that in the small.
+                STRIKES:    2,     // blows in one beat
+                DAMAGE_ON:  2,     // which one takes the strength off. Last, so
+                                   // the cycle builds to it
+                GAP_MS:     240,   // between blows. Must stay comfortably above
+                                   // STRIKE_MS or a blow lands while the last is
+                                   // still swinging and is dropped
+                SIZE:     2.0,     // the hammer's drawn box, in tiles, square —
+                                   // the sheet's frames are 128x128, so a square
+                                   // box keeps the art's own proportions.
+                                   //
+                                   // The VISIBLE hammer is smaller than this in
+                                   // both directions, because the art is drawn
+                                   // on the diagonal: the box holds a head-to-
+                                   // handle length of about 2 tiles laid corner
+                                   // to corner, so it stands nearer 1.4 tiles
+                                   // wide and tall on screen. Against a 1.9-tile
+                                   // farmer and a 1.62-tile block, that reads as
+                                   // a two-handed tool rather than a mallet
+                SIDE_X:   1.35,    // tiles from the canal seam it stands at.
+                                   // It alternates sides per block so three
+                                   // hammers up one canal do not form a column
+                Y:        -0.15,   // tiles above the block's centre
+
+                // ── The swing: THE BLOW ONLY ────────────────────────
+                // The hammer RESTS WOUND BACK and the only thing animated is
+                // the strike coming down. On impact it returns to the start
+                // position in the same frame, untweened, and waits there for the
+                // next beat. The raise is never shown.
+                //
+                // At one strike a second a visible wind-up would fill most of
+                // the gap between blows, so the tool would spend longer drawing
+                // back than striking — which reads as hesitating rather than
+                // working. Without it the impact lands on the beat and the pause
+                // sits after the blow, where a pause belongs.
+                // ── WHERE IT SITS, AND HOW FAR IT SWINGS ───────────────
+                // The art is drawn on the diagonal — head north-east, handle
+                // south-west — and REST_DEG 0 means it HANGS EXACTLY AS DRAWN,
+                // head up toward the block, with the swing arcing down from
+                // there. Anything else parks the hammer at a pose nobody drew.
+                //
+                // It used to rest at -100, wound back past the drawing's own
+                // angle so that the resting hammer looked wrong and only the
+                // moment of impact looked right. Resting at the art's alignment
+                // inverts that: the pose you see for most of the second is the
+                // one the artist actually made.
+                //
+                // THE ARC IS THE DIFFERENCE BETWEEN THESE TWO, so with the rest
+                // at 0 the whole 65 degrees is carry-through past the drawing —
+                // the head comes down onto the block and follows through, rather
+                // than stopping on contact, which reads as the tool being placed
+                // against the block rather than swung at it.
+                REST_DEG:      0,   // WHERE IT RESTS between blows: the art's
+                                    // own alignment, the pose as drawn
+                WIND_DEG:    -85,   // ...and how far back of that the swing
+                                    // STARTS. Applied as a TELEPORT on the frame
+                                    // the strike begins — the hammer is never
+                                    // seen travelling to it — so the arc gets 25
+                                    // extra degrees for no time and no visible
+                                    // wind-up. Tweening into it would put the
+                                    // raise back, which is what made the swing
+                                    // read as hesitating
+                STRIKE_DEG:   65,   // ...and where it is at impact.
+                                    // THE ARC IS -85 TO 65, so 150 degrees.
+                                    //
+                                    // The extra swing was taken off the WIND end
+                                    // and not this one on purpose: this is where
+                                    // the head meets the block, so moving it
+                                    // moves the point of contact. The wind end
+                                    // is a teleport nobody sees, so it can be
+                                    // pushed as far back as the arc wants for
+                                    // free
+                STRIKE_MS:   110,   // the whole of the visible swing. Must stay
+                                    // well under GAP_MS
+
+                // ── WHAT IT HITS FOR ───────────────────────────────────
+                // The hammer's strike power, written at its PIVOT — the one
+                // point on a swinging tool that stays put. It is a separate
+                // object rather than a child of the sprite, so it never turns
+                // or travels with the blow; anywhere else on the hammer a figure
+                // would be sweeping 150 degrees twice a second and unreadable.
+                //
+                // This is the other half of the block's own figure. The block
+                // says how much is left, the hammer says how fast it is coming
+                // off, and between them a player can see whether a slot is worth
+                // upgrading without doing any arithmetic.
+                POWER: {
+                    ENABLED:  true,
+                    SIZE:     18,
+                    COLOR:    '#ffffff',
+                    STROKE:   '#1d2b16',
+                    STROKE_W: 4,
+                    X:        0,      // tiles from the pivot
+                    Y:        0.12,   // ...and below it, clear of the handle
+                },
+
+                // ── THE GRIP ───────────────────────────────────────────
+                // Where the hand is on the sprite, as a fraction of the frame —
+                // the point the swing rotates about. The handle is south-west,
+                // so it is low and to the left. Mirrored automatically for the
+                // hammers on the other side; see _buildBlockHammer for why that
+                // mirroring is not optional.
+                PIVOT_X:    0.18,
+                PIVOT_Y:    0.85,
+
+                // ── OVER EVERYTHING ────────────────────────────────────
+                // The hammer draws above the crops, the trees, the farmer and
+                // the herd — over the whole world, not sorted into it.
+                //
+                // It is not a thing standing in the field; it is the player's
+                // action made visible, and it must be legible wherever the block
+                // happens to sit. An orchard is the case that settles it: a
+                // mango is two tiles wide and drawn at twice the farmer's
+                // height, so a block anywhere near one would be hammered by a
+                // tool that spends most of its swing behind leaves.
+                //
+                // WHY 6. Actors do not have one depth — _yDepth sorts them by
+                // world position from a base of 4, a thousandth per tile, and
+                // the world climbs, so they drift DOWNWARD from 4 as it goes
+                // up. 6 clears that base by 2, which is 2000 tiles of world:
+                // far more than a run reaches before the depth origin rebases.
+                // Anything that must stay above the hammer goes above 6 too —
+                // the strength bar is at 6.2 for exactly that reason.
+                DEPTH:        6,
+
+                // ── Impact: two effects, doing different jobs ──────────
+                // SPARKS are a flash of light at the contact point, gone in a
+                // third of a second. DEBRIS are chips with weight that arc out
+                // and fall, and outlive the blow. Together they read as the head
+                // striking (the flash) and taking something off (the chips);
+                // either alone reads as half of that.
+                SPARKS:       6,
+                SPARK_MS:     320,
+                SPARK_SPREAD: 0.45,  // tiles
+                SPARK_COLOR:  0xffe08a,
+
+                // Chips knocked off the slab. Thrown on a real arc — up and
+                // out, then down past where they started — because a chip
+                // travelling in a straight line is indistinguishable from a
+                // spark and the two effects then say the same thing twice.
+                DEBRIS: {
+                    ENABLED: true,
+                    COUNT:   5,      // per blow, scoring or not
+                    MS:      520,    // flight time; outlasts the 110ms swing on
+                                     // purpose, so chips from one blow are still
+                                     // falling as the next lands
+                    SIZE:    0.21,   // tiles, before a per-chip random 0.6-1.4x.
+                                     // 3x the original 0.07: at that size the
+                                     // chips were correct but incidental, read
+                                     // as grit, and the blow's whole visible
+                                     // result was a tint flash. These are chunks
+                                     // coming off a wall and are meant to be the
+                                     // thing you watch
+                    SPREAD:  0.8,    // tiles out from the contact point
+                    RISE:    0.45,   // tiles up at the top of the arc
+                    FALL:    0.5,    // tiles below the start where they land
+                    // Stone, in four shades so a burst is not one flat colour.
+                    COLORS:  [0x8a6a55, 0x6f5442, 0xa3836b, 0x5a4535],
+                },
+
+                // The damage number that flies off the block on each hit.
+                DROP: {
+                    ENABLED: true,
+                    SIZE:    19,
+                    COLOR:   '#ffd9d0',
+                    STROKE:  '#1d2b16',
+                    STROKE_W: 4,
+                    RISE:    0.55,   // tiles
+                    MS:      620,
+                },
+            },
 
             // A temporary wall across the main canal — a water blocker.
             //

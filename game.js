@@ -33,19 +33,15 @@ class AssetManager {
         return promise;
     }
 
-    ensureBattery(level) {
-        const key = `battery${level}`;
-        const data = getBatteryData(level);
-        if (!data) return Promise.resolve();
-        return this.ensureImage(key, `graphics/battery/${data.fileName}`);
-    }
-
-    // Warm a battery level in the background (fire-and-forget).
-    // ensureBattery already dedupes via textures.exists + the loading Map.
-    prefetchBattery(level) {
-        if (level < 1) return;
-        this.ensureBattery(level).catch(() => {});
-    }
+    // HAMMERS NEED NO FETCHING. All 100 live in one spritesheet loaded in
+    // preload(), so by the time anything can ask for one it is already there.
+    //
+    // These two survive as no-ops because the call sites are `await`ed and
+    // scattered; resolving instantly keeps them correct while they are removed.
+    // Batteries needed them: one PNG per level, fetched on demand, with the
+    // next level warmed so a merge could not land on a missing texture.
+    ensureBattery(level)   { return Promise.resolve(); }
+    prefetchBattery(level) {}
 }
 
 class GameScene extends Phaser.Scene {
@@ -431,13 +427,9 @@ class GameScene extends Phaser.Scene {
     // ================================================================
     preload() {
 
-        const startData = getBatteryData(CONFIG.BATTERY_START_LEVEL);
-    if (startData) {
-        this.load.image(
-            `battery${CONFIG.BATTERY_START_LEVEL}`,
-            `graphics/battery/${startData.fileName}`
-        );
-    }
+        // Every hammer in the game, in one 10x10 sheet. Frame N-1 is hammer N.
+        this.load.spritesheet(HAMMER_SHEET.KEY, HAMMER_SHEET.FILE,
+            { frameWidth: HAMMER_SHEET.FRAME, frameHeight: HAMMER_SHEET.FRAME });
         this.load.image('coin',          'graphics/coin.png');
         this.load.image('point',         'graphics/point.png');
         this.load.image('button',        'graphics/spawn_button3.png');
@@ -445,13 +437,20 @@ class GameScene extends Phaser.Scene {
         // Grain for the cell faces: neutral grey + blurred noise, blended over
         // the flat colour at bake time (see _makeCellTextures).
         this.load.image('cell_noise',    'graphics/cell_noise.png');
-        this.load.image('battery_crown', 'graphics/battery_crown.png');
+        // battery_crown.png — the crown on the unlock banner. Its only draw
+        // site is commented out (see createBatteryUnlockDisplay), so this is
+        // loading art nothing puts on screen; dropped with the battery files.
+        // this.load.image('battery_crown', 'graphics/battery_crown.png');
         this.load.image('bolt',          'graphics/ui/bolt.png');
 
         // The trencher's art: two parts, each its own 5-frame animation. They
         // are separate sprites (not one sheet) so each part's frames stay
         // coherent on their own — see TUNNEL.TRENCHER.
-        if (CONFIG.ROAD && CONFIG.ROAD.ENABLED) {
+        // THE RIG'S ART, requested only when there is a rig. In block mode the
+        // canal is already cut and the machine never appears, so asking for
+        // these is a handful of 404s on every boot — and once the trencher
+        // folder is deleted that is exactly what they would be.
+        if (CONFIG.ROAD && CONFIG.ROAD.ENABLED && !this._blockMode()) {
             const TR = CONFIG.ROAD.TUNNEL.TRENCHER;
             // Each part's frames come from ONE sheet — a row of cells the size of
             // that part, sliced by Phaser on load — so a loop is a single texture
@@ -623,8 +622,15 @@ class GameScene extends Phaser.Scene {
             if (BW.ENABLED !== false && BW.FILE) this.load.image('burrow', BW.FILE);
             const FN = TM.FENCE || {};
             if (FN.ENABLED !== false && FN.FILE) this.load.image('fence_pole', FN.FILE);
+            // The slab. It used to be a DAM, loaded only in the old
+            // water-holding mode; it is now what the hammers break, so it is
+            // needed on every level and loads unconditionally.
             const BK = TM.BLOCK || {};
-            if (this._blocksOn() && BK.FILE) this.load.image('block', BK.FILE);
+            const BX = TM.BLOCKS || {};
+            const blockFile = BK.FILE || 'graphics/block.png';
+            if (BX.ENABLED !== false || this._blocksOn()) {
+                this.load.image(BX.KEY || 'block', blockFile);
+            }
             const PW = TM.PLANT_WATER || {};
             if (PW.ENABLED !== false && PW.FILE) {
                 this.load.spritesheet('plant_water', PW.FILE,
@@ -1300,6 +1306,11 @@ console.log(
             edgeCols:   cut ? 0 : Math.max(0, Math.floor((map.width - Math.min(map.width,
                             (TM.MOBILE_TRIM || {}).COLS || map.width)) / 2)),
             props:      objects((TM.PROPS || {}).LAYER),// placed scenery (object layer)
+            // THE BLOCKS — what the hammers are for. Point objects named
+            // block1/block2/block3 on their own object layer, sitting in the
+            // main canal. The number is the whole identity: it picks which slot
+            // hammers it and which of the level's three strengths it carries.
+            blockObjs:  objects((TM.BLOCKS || {}).LAYER || 'block'),
             ranch:      objects((TM.ANIMALS || {}).LAYER),  // placed animals (object layer)
             burrows:    objects(((TM.ANIMALS || {}).BURROW || {}).LAYER),   // warren mouths
             fenceData:  layer((TM.ANIMALS || {}).FENCE_LAYER) || [],  // upright fences
@@ -1912,6 +1923,7 @@ console.log(
         this._buildFarmer(seg, gTop);
         this._buildFence(seg, gTop);
         this._buildProps(seg, gTop);
+        this._buildBlocks(seg, gTop);
         this._buildAnimals(seg, gTop);
         this._buildBurrows(seg, gTop);
         // AFTER the herd, because the tally counts what the level will produce
@@ -2566,6 +2578,652 @@ console.log(
     // two-tile canal, exactly the space two 128px canal frames occupy, so its
     // pixel size divided by the sheet's frame size times the on-screen tile
     // keeps it locked to the canal at any tile size.
+    // ================================================================
+    // BLOCKS + HAMMERS
+    // ================================================================
+    // The game's whole conflict. Three walls stand in a canal that is already
+    // built, and three hammers beat on them until they are gone. Nothing here
+    // knows about digging; the canal is a given.
+    //
+    // Each block is bound to a SLOT by its number: block1 to slot 1, and so on,
+    // counted up the canal in the order the water meets them. The three fights
+    // run at the same time and independently — an empty slot stalls its own
+    // block and nothing else — which is Blumgi's three-monster level exactly,
+    // and why the strengths come from the three HP columns rather than a total.
+
+    // This level's three strengths. BLUMGI_HP is 64 rows and the level rotation
+    // wraps past the end, so the row wraps with it.
+    _levelBlockHP(levelIndex) {
+        const BK = (CONFIG.ROAD.TILEMAP.BLOCKS) || {};
+        const fb = BK.FALLBACK || [100, 200, 400];
+        const tbl = (typeof BLUMGI_HP !== 'undefined' && BLUMGI_HP.length) ? BLUMGI_HP : null;
+        const row = tbl ? tbl[(levelIndex || 0) % tbl.length] : null;
+        const sc  = BK.STRENGTH_SCALE || 1;
+        return [0, 1, 2].map((i) => {
+            const v = row ? row[i] : fb[i];
+            return Math.max(1, Math.round((v || fb[i]) * sc));
+        });
+    }
+
+    // Read the number off a marker name: 'block2' -> 2. Anything without a
+    // trailing digit is not a block marker.
+    _blockNumber(name) {
+        const m = /(\d+)\s*$/.exec(name || '');
+        return m ? parseInt(m[1], 10) : 0;
+    }
+
+    _buildBlocks(seg, gTop) {
+        const TM = CONFIG.ROAD.TILEMAP, BK = TM.BLOCKS || {};
+        const g  = this.tileGrid;
+        seg.blocks = [];
+        if (!BK.ENABLED || !g || !g.blockObjs || !g.blockObjs.length) return;
+        if (!this.textures.exists(BK.KEY || 'block')) {
+            console.warn('[blocks] no block art loaded — nothing to break');
+            return;
+        }
+        const hp  = this._levelBlockHP(seg.levelIndex);
+        const src = this.textures.get(BK.KEY || 'block').getSourceImage();
+        const aspect = src.height / src.width;
+
+        // Sorted BOTTOM-UP, so index 0 is the block the water meets first
+        // whatever order the markers happen to sit in the file. The marker's
+        // own number still decides its slot and its strength — this only settles
+        // ties and makes the water's job a walk up a list.
+        const marks = g.blockObjs
+            .filter((o) => this._blockNumber(o.name) > 0)
+            .sort((a, b) => b.row - a.row);
+
+        for (const o of marks) {
+            const n   = this._blockNumber(o.name);
+            const idx = Math.min(2, Math.max(0, n - 1));    // slot / strength index
+            const x   = g.left + o.col * g.tile;
+            const y   = gTop + o.row * g.tile;
+            const w   = (BK.WIDTH || 2) * g.tile;
+
+            const img = this._addB(this.add.image(x, y, BK.KEY || 'block')
+                .setOrigin(0.5, BK.ORIGIN_Y !== undefined ? BK.ORIGIN_Y : 0.5)
+                .setDisplaySize(w, w * aspect)
+                .setDepth(BK.DEPTH !== undefined ? BK.DEPTH : 3.11), seg);
+
+            const b = {
+                idx, n, img, x, y, tile: g.tile, seg,
+                row: o.row,                    // fractional row, for the water
+                max: hp[idx], hp: hp[idx],
+                broken: false,      // strength gone — stop hammering it
+                cleared: false,     // shatter finished — the water may pass
+                t: 0,                          // ms since this block's last strike
+                hammer: null, bar: null, barFill: null, label: null,
+                side: (idx % 2 === 0) ? -1 : 1,   // hammers alternate sides so
+                                                  // three of them up one canal
+                                                  // do not line up in a column
+            };
+            this._buildBlockBar(seg, b);
+            this._buildBlockHammer(seg, b);
+            seg.blocks.push(b);
+        }
+        seg.blocks.sort((a, b) => b.row - a.row);   // bottom-up
+        if (CONFIG.DEBUG_MAP) {
+            console.log(`[blocks] level ${seg.levelIndex}: ` +
+                seg.blocks.map((b) => `block${b.n}=${this._bigNum(b.max)}`).join('  '));
+        }
+    }
+
+    // Strength readout. TWO PARTS, SEPARATELY SWITCHED — the bar and the figure
+    // still to go — because they turned out to be answering different questions
+    // and only one of them was worth the room.
+    //
+    // The bar is off (BAR.ENABLED). On a block of 25 it was honest, but the
+    // strengths climb into the billions within a few levels and a single strike
+    // then moves the fill by less than a pixel: a bar that visibly does nothing
+    // for a minute reads as broken, not as hard. The figure has the opposite
+    // property — it changes on every hit at every scale, because it is the
+    // number itself and not a fraction of it.
+    _buildBlockBar(seg, b) {
+        const BR = ((CONFIG.ROAD.TILEMAP.BLOCKS || {}).BAR) || {};
+        const s  = this.layoutConfig.scale;
+        const t  = b.tile;
+        const w  = (BR.W || 1.8) * t, h = (BR.H || 0.17) * t;
+        const by = b.y + (BR.Y !== undefined ? BR.Y : -0.62) * t;
+        const dep = BR.DEPTH !== undefined ? BR.DEPTH : 6.2;
+
+        if (BR.ENABLED !== false) {
+            b.bar = this._addB(this.add.graphics().setDepth(dep), seg);
+            b.barGeom = { w, h, by, r: (BR.RADIUS || 0.05) * t };
+            this._paintBlockBar(b);
+        }
+        if (BR.TEXT === false) return;
+
+        // Where the bar WOULD have been when there is no bar, so removing it
+        // does not leave the figure floating half a tile higher than the art it
+        // belongs to.
+        const ty = BR.ENABLED !== false ? by - h * 1.5 : by + h;
+        b.label = this._addB(this.add.text(b.x, ty, this._bigNum(b.hp), {
+                fontSize: Math.max(9, Math.round((BR.TEXT_SIZE || 17) * s)) + 'px',
+                fontFamily: CONFIG.FONT_FAMILY, fontStyle: CONFIG.FONT_WEIGHT,
+                color: BR.TEXT_COLOR || '#ffffff',
+                stroke: BR.TEXT_STROKE || '#1d2b16',
+                strokeThickness: Math.max(1, Math.round((BR.TEXT_STROKE_W || 4) * s)),
+            }).setOrigin(0.5, 1).setDepth(dep + 0.001), seg);
+    }
+
+    _paintBlockBar(b) {
+        const BR = ((CONFIG.ROAD.TILEMAP.BLOCKS || {}).BAR) || {};
+        if (!b.bar || !b.barGeom) return;
+        const { w, h, by, r } = b.barGeom;
+        const f = Math.max(0, Math.min(1, b.hp / b.max));
+        b.bar.clear();
+        b.bar.fillStyle(BR.BG !== undefined ? BR.BG : 0x2b1c12, 0.85);
+        b.bar.fillRoundedRect(b.x - w / 2, by - h / 2, w, h, r);
+        if (f > 0) {
+            const col = f <= (BR.LOW_AT !== undefined ? BR.LOW_AT : 0.25)
+                ? (BR.LOW !== undefined ? BR.LOW : 0xd4543f)
+                : (BR.FILL !== undefined ? BR.FILL : 0x6fd44f);
+            b.bar.fillStyle(col, 1);
+            b.bar.fillRoundedRect(b.x - w / 2, by - h / 2, Math.max(r * 2, w * f), h, r);
+        }
+    }
+
+    // The hammer that beats on this block. It stands BESIDE the block rather
+    // than travelling to it — the tool appears at the edge of the target and
+    // swings, which is the Minecraft read and costs no pathing.
+    _buildBlockHammer(seg, b) {
+        const H = CONFIG.ROAD.TILEMAP.HAMMER || {};
+        if (H.ENABLED === false) return;
+        const t = b.tile;
+        const hx = b.x + b.side * (H.SIDE_X !== undefined ? H.SIDE_X : 1.35) * t;
+        const hy = b.y + (H.Y !== undefined ? H.Y : -0.15) * t;
+        const size = (H.SIZE || 1.5) * t;
+        // ── THE GRIP ────────────────────────────────────────────────────
+        // The art is drawn on the DIAGONAL: head north-east, handle south-west,
+        // about 45 degrees. So the hand is at the BOTTOM-LEFT corner of the
+        // frame, and that corner is the pivot — rotating about anything else
+        // swings the handle as well as the head and the hammer looks thrown
+        // rather than held.
+        //
+        // MIRRORED FOR THE OTHER SIDE. flipX mirrors the picture inside the
+        // frame but leaves the origin where it was in frame space, so a pivot of
+        // 0.18 that sat on the handle before the flip lands on the HEAD after
+        // it. The x has to be mirrored with the art — 0.18 becomes 0.82 — or the
+        // right-hand hammers pivot about their own heads.
+        const px = H.PIVOT_X !== undefined ? H.PIVOT_X : 0.18;
+        const py = H.PIVOT_Y !== undefined ? H.PIVOT_Y : 0.85;
+        const spr = this._addB(this.add.image(hx, hy, HAMMER_SHEET.KEY, 0)
+            .setDisplaySize(size, size)
+            .setOrigin(b.side < 0 ? px : 1 - px, py)
+            .setDepth(H.DEPTH !== undefined ? H.DEPTH : 3.2)
+            .setVisible(false), seg);
+        spr.setFlipX(b.side > 0);
+        b.hammer = spr;
+        // REST IS THE ART'S OWN ALIGNMENT. REST_DEG is 0, which means the sprite
+        // hangs exactly as drawn — the 45 degree diagonal, head up toward the
+        // block — and the swing arcs down from there. It used to rest at -100,
+        // wound back past the drawing's own angle, which is why the hammer sat
+        // at a pose the artist never drew.
+        const sgn = b.side < 0 ? 1 : -1;
+        b.restRot = Phaser.Math.DegToRad((H.REST_DEG !== undefined ? H.REST_DEG : 0) * sgn);
+        // WHERE THE SWING STARTS, which is NOT where it rests. The hammer is
+        // snapped back this far the instant before it comes down — a teleport,
+        // never a tween, so nothing is ever seen travelling backwards. It buys
+        // the arc 25 more degrees without the wind-up costing any time or
+        // reading as hesitation.
+        b.windRot = Phaser.Math.DegToRad(
+            ((H.REST_DEG !== undefined ? H.REST_DEG : 0) +
+             (H.WIND_DEG !== undefined ? H.WIND_DEG : -25)) * sgn);
+        spr.rotation = b.restRot;
+        b.swinging = false;
+
+        // ── WHAT THIS HAMMER HITS FOR, at the pivot ─────────────────────
+        // Pinned to the pivot and NOT parented to the sprite, so it never turns
+        // or travels with the swing. That is the point of putting it here: the
+        // pivot is the one part of a rotating hammer that does not move, so a
+        // figure placed on it is readable while everything above it sweeps 150
+        // degrees twice a second. Anywhere else on the tool it would be
+        // illegible, and rotating with the art it would be worse than nothing.
+        const PW = H.POWER || {};
+        if (PW.ENABLED !== false) {
+            const sL = this.layoutConfig.scale;
+            b.powerLabel = this._addB(this.add.text(
+                    hx + (PW.X || 0) * t, hy + (PW.Y !== undefined ? PW.Y : 0.12) * t, '', {
+                    fontSize: Math.max(9, Math.round((PW.SIZE || 18) * sL)) + 'px',
+                    fontFamily: CONFIG.FONT_FAMILY, fontStyle: CONFIG.FONT_WEIGHT,
+                    color: PW.COLOR || '#ffffff',
+                    stroke: PW.STROKE || '#1d2b16',
+                    strokeThickness: Math.max(1, Math.round((PW.STROKE_W || 4) * sL)),
+                }).setOrigin(0.5, 0)
+                  .setDepth((H.DEPTH !== undefined ? H.DEPTH : 6) + 0.002)
+                  .setVisible(false), seg);
+        }
+    }
+
+    // One strike, and ONLY the strike.
+    //
+    // The hammer RESTS WOUND BACK and the only thing ever animated is the blow
+    // coming down; when it lands it returns to that start position in the same
+    // frame, with no tween. So what plays is strike, strike, strike, and never
+    // the arm being lifted.
+    //
+    // This is deliberate and not a saving. A wind-up costs time before the hit,
+    // and at one strike a second a visible raise fills most of the gap between
+    // blows — the tool spends longer drawing back than striking, which reads as
+    // hesitating rather than working. Cutting it puts the impact on the beat and
+    // leaves the pause where a pause belongs: after the blow, not before it.
+    //
+    // Damage is dealt AT IMPACT, not at the start of the swing, so the figure
+    // and the picture agree.
+    _swingHammer(b, power, scoring, last) {
+        const H = CONFIG.ROAD.TILEMAP.HAMMER || {};
+        const spr = b.hammer;
+        if (!spr || !spr.scene || b.swinging || b.broken) return;
+        b.swinging = true;
+        const down = Phaser.Math.DegToRad(
+            (H.STRIKE_DEG !== undefined ? H.STRIKE_DEG : 28) * (b.side < 0 ? 1 : -1));
+        // SNAP BACK, THEN SWING. The wind-up is a teleport on the frame the
+        // strike begins — the hammer is never seen travelling to it — so the
+        // player reads one motion, forward, over a wider arc than the rest pose
+        // alone would give. Tweening into it instead would put the raise back,
+        // which is the thing that made the swing read as hesitating.
+        //
+        // Also the reset: whatever the last swing left behind, a strike
+        // interrupted by the block breaking or by its hammer being pulled from
+        // the slot must not start the next one halfway down.
+        spr.rotation = b.windRot;
+        this.tweens.add({
+            targets: spr, rotation: down,
+            duration: H.STRIKE_MS || 90, ease: 'Quad.easeIn',
+            onComplete: () => {
+                // ONLY THE SCORING STRIKE TAKES STRENGTH OFF. The others land
+                // on the block and look identical — flash and sparks — but do
+                // no damage and throw no number.
+                if (scoring) this._hitBlock(b, power);
+                else         this._tapBlock(b);
+                // WHERE IT GOES AFTER THE BLOW, and it is not always the same
+                // place. Mid-cycle it snaps back to the WIND position, ready to
+                // come straight down again; only the LAST blow of the cycle
+                // returns to rest.
+                //
+                // So two strikes read as one continuous action —
+                //   rest, wind, hit, wind, hit, rest
+                // — instead of two separate ones with the tool standing to
+                // attention in between. Passing through rest mid-cycle put the
+                // hammer back at its drawn angle for a frame between blows,
+                // which broke the pair into two unrelated swings.
+                //
+                // Untweened either way: the return is not part of what the
+                // player is meant to watch.
+                if (spr.scene) spr.rotation = last ? b.restRot : b.windRot;
+                b.swinging = false;
+            },
+        });
+    }
+
+    // Damage landing: the number comes off, the slab takes the blow, and if that
+    // was the last of its strength it breaks.
+    _hitBlock(b, power) {
+        const BK = CONFIG.ROAD.TILEMAP.BLOCKS || {};
+        if (b.broken || !b.img || !b.img.scene) return;
+        const dealt = Math.min(b.hp, Math.max(0, power));
+        b.hp -= dealt;
+        this._paintBlockBar(b);
+        if (b.label && b.label.scene) b.label.setText(this._bigNum(b.hp));
+        this._showBlockDamage(b, dealt);
+        this._sparkBlock(b);
+        this._debrisBlock(b);
+
+        // THE BLOCK DOES NOT MOVE. It took a shove down into the channel and a
+        // sideways jolt, which is how a crate or a barrel answers a hit — and
+        // that is exactly what it should not read as. This is a slab wedged
+        // across a canal, and the whole premise is that it is immovable until it
+        // is broken. A wall that flinches on every tap is a light wall.
+        //
+        // So the only reaction is a flash, and it is a PLACEHOLDER: the real
+        // answer is a crack overlay that advances with the damage, the way
+        // Minecraft tells you a block is nearly through. That is the thing worth
+        // watching, and it says what a shake cannot — how far along you are.
+        this._flashBlock(b);
+
+        if (b.hp <= 0) this._breakBlock(b);
+    }
+
+    // A blow that lands but does not score. It looks exactly like one that
+    // does, minus the number — which is the point: the player sees the hammer
+    // working every time, and the strength moves once a cycle.
+    _tapBlock(b) {
+        if (b.broken || !b.img || !b.img.scene) return;
+        this._flashBlock(b);
+        this._sparkBlock(b);
+        this._debrisBlock(b);
+    }
+
+    // The flash, shared by scoring and non-scoring blows. Held on a timer
+    // rather than a tween because nothing moves any more; the handle is kept so
+    // a second strike landing inside HIT_MS cancels the first one's restore
+    // instead of having its own tint wiped by it.
+    _flashBlock(b) {
+        const BK = CONFIG.ROAD.TILEMAP.BLOCKS || {};
+        const img = b.img;
+        if (!img || !img.scene) return;
+        img.setTint(BK.HIT_TINT !== undefined ? BK.HIT_TINT : 0xffd8c0);
+        if (b.flashT) b.flashT.remove(false);
+        b.flashT = this.time.delayedCall(BK.HIT_MS || 90, () => {
+            b.flashT = null;
+            if (!img.scene) return;
+            // Back to however battered it now looks, never to clean.
+            this._tintBlockDamage(b);
+        });
+    }
+
+    // Darkens as its strength goes, so a block's state is legible without
+    // reading the bar.
+    _tintBlockDamage(b) {
+        const BK = CONFIG.ROAD.TILEMAP.BLOCKS || {};
+        const to = BK.DAMAGE_TINT !== undefined ? BK.DAMAGE_TINT : 0x8a6a55;
+        const f  = Math.max(0, Math.min(1, b.hp / b.max));
+        if (f >= 0.999) { b.img.clearTint(); return; }
+        b.img.setTint(this._lerpColor(to, 0xffffff, f));
+    }
+
+    _showBlockDamage(b, dealt) {
+        const D = ((CONFIG.ROAD.TILEMAP.HAMMER || {}).DROP) || {};
+        if (D.ENABLED === false || !(dealt > 0)) return;
+        const s = this.layoutConfig.scale;
+        const txt = this._addB(this.add.text(
+                b.x + b.side * 0.35 * b.tile, b.y - 0.2 * b.tile,
+                '-' + this._bigNum(dealt), {
+                fontSize: Math.max(9, Math.round((D.SIZE || 19) * s)) + 'px',
+                fontFamily: CONFIG.FONT_FAMILY, fontStyle: CONFIG.FONT_WEIGHT,
+                color: D.COLOR || '#ffd9d0',
+                stroke: D.STROKE || '#1d2b16',
+                strokeThickness: Math.max(1, Math.round((D.STROKE_W || 4) * s)),
+            }).setOrigin(0.5, 1)
+              .setDepth((CONFIG.ROAD.TILEMAP.BLOCKS.BAR.DEPTH || 3.13) + 0.002), b.seg);
+        this.tweens.add({
+            targets: txt,
+            y: txt.y - (D.RISE !== undefined ? D.RISE : 0.55) * b.tile,
+            alpha: 0, duration: D.MS || 620, ease: 'Sine.easeOut',
+            onComplete: () => txt.destroy(),
+        });
+    }
+
+    // Chips knocked off the slab: stone-coloured flecks that fly out, ARC, and
+    // fall. The sparks beside them are a flash of light at the contact point and
+    // are gone in a third of a second; these have weight and outlive the blow,
+    // which is what says the hammer took something OFF the block rather than
+    // merely touching it.
+    //
+    // Thrown with a real arc rather than a straight line — up and out, then
+    // down past where they started — because a chip that travels in a straight
+    // line reads as a spark and the two effects then say the same thing twice.
+    _debrisBlock(b) {
+        const D = ((CONFIG.ROAD.TILEMAP.HAMMER || {}).DEBRIS) || {};
+        if (D.ENABLED === false) return;
+        const n = D.COUNT !== undefined ? D.COUNT : 5;
+        if (n <= 0) return;
+        const t  = b.tile;
+        const ms = D.MS !== undefined ? D.MS : 520;
+        const cols = D.COLORS || [0x8a6a55, 0x6f5442, 0xa3836b, 0x5a4535];
+        // The contact point: where the head lands, on the block's struck side.
+        const ox = b.x + b.side * 0.3 * t, oy = b.y - 0.08 * t;
+
+        for (let i = 0; i < n; i++) {
+            const sz = (D.SIZE !== undefined ? D.SIZE : 0.07) * t
+                     * (0.6 + Math.random() * 0.8);
+            const p = this._addB(this.add.rectangle(ox, oy, sz, sz,
+                    cols[(Math.random() * cols.length) | 0])
+                .setDepth((CONFIG.ROAD.TILEMAP.HAMMER.DEPTH !== undefined
+                          ? CONFIG.ROAD.TILEMAP.HAMMER.DEPTH : 6) - 0.001), b.seg);
+            p.rotation = Math.random() * Math.PI;
+
+            // Mostly AWAY from the block, since that is the way the head throws
+            // them, but not exclusively — a few going the other way keep the
+            // burst from looking like it was fired from a nozzle.
+            const dir  = Math.random() < 0.78 ? b.side : -b.side;
+            const outX = ox + dir * (0.15 + Math.random() * (D.SPREAD !== undefined ? D.SPREAD : 0.8)) * t;
+            const peak = oy - (0.15 + Math.random() * (D.RISE !== undefined ? D.RISE : 0.45)) * t;
+            const rest = oy + (D.FALL !== undefined ? D.FALL : 0.5) * t * (0.5 + Math.random());
+
+            // Horizontal travel is one steady movement across the whole flight;
+            // the vertical is two, up then down. That is what makes the arc.
+            this.tweens.add({ targets: p, x: outX, rotation: p.rotation + (Math.random() - 0.5) * 6,
+                duration: ms, ease: 'Linear' });
+            this.tweens.add({ targets: p, y: peak, duration: ms * 0.38, ease: 'Quad.easeOut',
+                onComplete: () => {
+                    if (!p.scene) return;
+                    this.tweens.add({ targets: p, y: rest, alpha: 0,
+                        duration: ms * 0.62, ease: 'Quad.easeIn',
+                        onComplete: () => p.destroy() });
+                } });
+        }
+    }
+
+    _sparkBlock(b) {
+        const H = CONFIG.ROAD.TILEMAP.HAMMER || {};
+        const n = H.SPARKS !== undefined ? H.SPARKS : 6;
+        if (n <= 0) return;
+        const t = b.tile;
+        const spread = (H.SPARK_SPREAD !== undefined ? H.SPARK_SPREAD : 0.45) * t;
+        for (let i = 0; i < n; i++) {
+            const p = this._addB(this.add.circle(
+                    b.x + b.side * 0.3 * t, b.y - 0.1 * t,
+                    Math.max(1, t * 0.022),
+                    H.SPARK_COLOR !== undefined ? H.SPARK_COLOR : 0xffe08a)
+                .setDepth((H.DEPTH !== undefined ? H.DEPTH : 3.2) + 0.001), b.seg);
+            this.tweens.add({
+                targets: p,
+                x: p.x + (Math.random() - 0.5) * 2 * spread,
+                y: p.y - Math.random() * spread,
+                alpha: 0, scale: 0.3,
+                duration: H.SPARK_MS || 320, ease: 'Quad.easeOut',
+                onComplete: () => p.destroy(),
+            });
+        }
+    }
+
+    // The slab comes apart. The pieces are copies of its own art, scaled down
+    // and thrown, so nothing new has to be drawn for it.
+    _breakBlock(b) {
+        const BK = CONFIG.ROAD.TILEMAP.BLOCKS || {};
+        if (b.broken) return;
+        b.broken = true;
+        b.hp = 0;
+        this._clearStrikeQueue(b);      // nothing left to hit
+        const t = b.tile, img = b.img;
+
+        if (b.hammer && b.hammer.scene) {
+            this.tweens.killTweensOf(b.hammer);
+            this.tweens.add({ targets: b.hammer, alpha: 0, duration: 220,
+                onComplete: () => b.hammer.setVisible(false) });
+        }
+        for (const o of [b.bar, b.label, b.powerLabel]) {
+            if (o && o.scene) this.tweens.add({ targets: o, alpha: 0, duration: 220,
+                onComplete: () => o.destroy() });
+        }
+
+        const n = BK.SHARDS !== undefined ? BK.SHARDS : 7;
+        const ms = BK.BREAK_MS !== undefined ? BK.BREAK_MS : 420;
+        for (let i = 0; i < n; i++) {
+            const sh = this._addB(this.add.image(b.x, b.y, BK.KEY || 'block')
+                .setOrigin(0.5)
+                .setDisplaySize(img.displayWidth / 2.6, img.displayHeight / 2.6)
+                // SHARDS GO OVER THE WATER, unlike the slab they came off.
+                // The slab is submerged on purpose, but pieces thrown up out of
+                // it are in the air — inheriting the block's depth left them
+                // drawing under the surface, so the break happened behind the
+                // water and mostly could not be seen.
+                .setDepth(this._mainDepth() + 0.02), b.seg);
+            sh.setTint(BK.DAMAGE_TINT !== undefined ? BK.DAMAGE_TINT : 0x8a6a55);
+            this.tweens.add({
+                targets: sh,
+                x: b.x + (Math.random() - 0.5) * 2.2 * t,
+                y: b.y - Math.random() * (BK.BREAK_RISE !== undefined ? BK.BREAK_RISE : 0.5) * t
+                        + 0.5 * t,
+                rotation: (Math.random() - 0.5) * 2 * (BK.BREAK_SPIN !== undefined ? BK.BREAK_SPIN : 0.6),
+                alpha: 0, scale: sh.scale * 0.5,
+                duration: ms, ease: 'Quad.easeIn',
+                onComplete: () => sh.destroy(),
+            });
+        }
+        this.tweens.add({
+            targets: img, alpha: 0, scaleY: img.scaleY * 0.4,
+            duration: ms * 0.5, ease: 'Quad.easeIn',
+            onComplete: () => img.destroy(),
+        });
+
+        // THE WATER IS RELEASED HERE, and not a frame earlier. Everything above
+        // is still playing; `cleared` is what _holdingBlock reads, so until this
+        // fires the canal behaves as though the wall were still standing.
+        const hold = ms + (BK.RELEASE_DELAY_MS !== undefined ? BK.RELEASE_DELAY_MS : 0);
+        this.time.delayedCall(hold, () => {
+            b.cleared = true;
+            console.log(`[blocks] block${b.n} cleared — water released`);
+        });
+        console.log(`[blocks] block${b.n} broken on level ${b.seg.levelIndex}`);
+    }
+
+    // ONE CYCLE OF BLOWS. The beat is still RATE_MS and the damage per beat is
+    // still one hammer's full strike power — the economy is untouched. What
+    // changed is that the beat now carries SEVERAL swings instead of one, and
+    // only the last of them takes anything off.
+    //
+    // WHY. A single 90ms swing inside a 1000ms beat left the hammer motionless
+    // for 91% of the time, which reads as a tool that is frozen and twitching
+    // rather than one that is working. Minecraft's answer is that the swing
+    // animation and the damage tick are DECOUPLED — the pickaxe swings steadily
+    // the whole time you hold the button while the crack advances on its own
+    // clock. This is that, in the small: the hand keeps working, the number
+    // moves once a beat.
+    //
+    // The damage lands on the LAST blow rather than the first so the cycle
+    // builds to it — two taps and a result, not a result and then two taps.
+    _strikeCycle(b, power) {
+        const H = CONFIG.ROAD.TILEMAP.HAMMER || {};
+        const n   = Math.max(1, H.STRIKES !== undefined ? H.STRIKES : 2);
+        const on  = Math.min(n, Math.max(1, H.DAMAGE_ON !== undefined ? H.DAMAGE_ON : n));
+        const gap = H.GAP_MS !== undefined ? H.GAP_MS : 240;
+        this._clearStrikeQueue(b);
+        for (let i = 0; i < n; i++) {
+            const scoring = (i + 1) === on;
+            // The last blow of the cycle is the only one that returns the hammer
+            // to rest. SEPARATE from `scoring`: which blow does the damage and
+            // which one ends the cycle are two different questions, and
+            // DAMAGE_ON can name any of them.
+            const last = (i + 1) === n;
+            if (i === 0) { this._swingHammer(b, power, scoring, last); continue; }
+            const t = this.time.delayedCall(i * gap, () => {
+                if (b.queue) b.queue = b.queue.filter((x) => x !== t);
+                this._swingHammer(b, power, scoring, last);
+            });
+            (b.queue || (b.queue = [])).push(t);
+        }
+    }
+
+    // Drop any blows still waiting to be thrown — the block broke under an
+    // earlier one in the cycle, or its hammer left the slot. Without this a
+    // dead block keeps being struck by a hammer that is no longer there.
+    _clearStrikeQueue(b) {
+        // A cycle cut short — the block broke under an earlier blow, or the
+        // hammer left the slot — would otherwise leave the tool parked at the
+        // WIND angle, which is a pose it is only ever meant to hold for the
+        // fraction of a second between two blows.
+        if (b.hammer && b.hammer.scene && !b.swinging && b.queue && b.queue.length) {
+            b.hammer.rotation = b.restRot;
+        }
+        if (!b.queue) return;
+        for (const t of b.queue) if (t) t.remove(false);
+        b.queue = null;
+    }
+
+    // The lowest block still holding the water back.
+    //
+    // TWO FLAGS, NOT ONE, and the difference is the whole of the handover:
+    //
+    //   broken   its strength reached zero. The hammering stops AT ONCE — there
+    //            is nothing left to hit, and a tool still swinging at a slab
+    //            that is coming apart looks like it missed the moment.
+    //   cleared  the shatter has finished playing. Only now may the water move.
+    //
+    // They used to be the same flag, so the water started climbing on the frame
+    // the last blow landed and ran up through the shards while they were still
+    // in the air. The break and the release then read as one muddled event
+    // instead of cause and effect: the wall goes, THEN the water comes.
+    _holdingBlock(seg) {
+        if (!seg || !seg.blocks) return null;
+        for (const b of seg.blocks) if (!b.cleared) return b;
+        return null;
+    }
+
+    _blocksCleared(seg) { return !this._holdingBlock(seg); }
+
+    // The strike loop. Every block with a hammer in its slot takes one blow per
+    // RATE_MS, for that hammer's full strike power.
+    _updateBlocks(dtMs) {
+        const H = CONFIG.ROAD.TILEMAP.HAMMER || {};
+        if (H.ENABLED === false) return;
+        const rate = H.RATE_MS || 1000;
+        for (const seg of (this.segments || [])) {
+            if (!seg.blocks || !seg.blocks.length) continue;
+            // ONLY THE LEVEL BEING PLAYED. Levels are built ahead of the one in
+            // view, so without this the hammers would quietly clear the next
+            // three farms while the player watched this one.
+            if (seg !== this.active) continue;
+            // ...AND NOT UNTIL THE ONE BELOW HAS FINISHED.
+            //
+            // `active` moves at the START of the previous level's completion
+            // beat — the handover fires the moment its water reaches the
+            // boundary, while its crops are still coming up, its farmer is still
+            // gathering and its icon has not flown. So being active is not the
+            // same as being the level the player is watching, and hammering on
+            // it alone started the next farm's blocks over the top of the last
+            // farm's payoff.
+            //
+            // waterHold is the flag that already answers this question: the
+            // canal is dammed from the handover until _finishStretch lets it go
+            // at the END of that beat. Hammering waits on the same signal, so
+            // the block, its water and the farm below it can never disagree.
+            if (seg.tunnel && seg.tunnel.waterHold) continue;
+            for (const b of seg.blocks) {
+                if (b.broken) continue;
+                const slot  = this.chargingSlots[b.idx];
+                const power = slot ? slot.chargePerMinute : 0;
+                const spr   = b.hammer;
+                if (!power) {
+                    // No hammer in that slot: this fight stops, and says so by
+                    // the tool not being there. Any blows still queued from the
+                    // last beat go with it.
+                    this._clearStrikeQueue(b);
+                    if (spr && spr.visible && !b.swinging) spr.setVisible(false);
+                    if (b.powerLabel) b.powerLabel.setVisible(false);
+                    b.shownPower = undefined;
+                    b.t = 0;
+                    continue;
+                }
+                if (spr && !spr.visible) {
+                    spr.setVisible(true).setAlpha(1);
+                    spr.rotation = b.restRot;
+                }
+                // The figure is the SLOT's power, so swapping a hammer mid-level
+                // changes it on the same frame the picture changes. Written only
+                // when it differs — this runs every frame.
+                if (b.powerLabel && b.shownPower !== power) {
+                    b.shownPower = power;
+                    b.powerLabel.setText(this._bigNum(power)).setVisible(true).setAlpha(1);
+                }
+                // The picture follows whatever is in the slot right now, so
+                // swapping a hammer mid-level changes the tool as well as the
+                // number.
+                if (spr && slot.level !== b.shownLevel) {
+                    spr.setFrame(getHammerFrame(slot.level));
+                    b.shownLevel = slot.level;
+                }
+                b.t += dtMs;
+                if (b.t >= rate) {
+                    b.t -= rate;
+                    this._strikeCycle(b, power);
+                    this._pulseBatteryIcon(this.platforms[b.idx]);
+                }
+            }
+        }
+    }
+
     _placeBlock(tn, atY) {
         const TM = CONFIG.ROAD.TILEMAP, BK = TM.BLOCK || {};
         if (!this._blocksOn() || !this.textures.exists('block')) return null;
@@ -2689,10 +3347,23 @@ console.log(
 
     // Drop in any main-canal bridge the cut has now cleared. Same test as the
     // dams and the same landing, so a level's structures all arrive the one way.
+    // A bridge drops in once the front has passed UNDER it — never before, so
+    // it is always seen arriving over a channel that is already there.
+    //
+    // WHICH front depends on the regime, and getting it wrong is invisible in
+    // one of them and glaring in the other. The trencher's front was the DIG:
+    // the blade cut the ground and the crossing was thrown over behind it. In
+    // block mode nothing digs — progressPx is pinned to the full length on the
+    // first frame so the canal shows built — so gating on it dropped every
+    // bridge on the level at once, before a drop of water had moved.
+    //
+    // The front that actually advances now is the WATER, so that is what a
+    // bridge waits for.
     _checkBridges(tn) {
         if (!tn.bridges || !tn.bridges.length) return;
+        const front = this._blockMode() ? tn.wet : tn.progressPx;
         for (const b of tn.bridges) {
-            if (b.done || tn.progressPx < b.at) continue;
+            if (b.done || front < b.at) continue;
             b.done = true;
             if (!b.spr || !b.spr.scene) continue;
             b.spr.setVisible(true);
@@ -7438,7 +8109,9 @@ console.log(
         // (1.56). The machine is down in the ditch, so the water it lets in
         // rolls over the belt's trailing end, crest and all. Both are parked
         // on frame 1 and only run while the machine is working.
-        this._makeTrencherAnims();
+        // Skipped in block mode: its frames come from the sheets above, which
+        // are not loaded when there is no machine to animate.
+        if (!this._blockMode()) this._makeTrencherAnims();
         const flip = !!TR.FLIP_Y;
         // The rig's shadow: one still image for both parts, sized by the same
         // ratio (its art is authored in the same source-px space, so a plain
@@ -7569,6 +8242,22 @@ console.log(
         this.tunnel.dams = this._buildDams(this.tunnel);
         this.tunnel.lilies = this._buildLilies(seg, band, this.tunnel);
         if (seg) seg.tunnel = this.tunnel;
+
+        // ── BLOCK MODE: THERE IS NO MACHINE ──────────────────────────────
+        // The rig, its shadow, the torn lip of ground at the cut, the spoil it
+        // throws and the readout of work remaining all belong to digging. The
+        // canal is already built, so every one of them is hidden here — in one
+        // place, and without touching the code that makes them, so switching
+        // BLOCKS.ENABLED off brings the whole machine back intact.
+        if (this._blockMode()) {
+            this._hideTrencher(this.tunnel);
+            // EVERY tunnel, not just the one being played. Levels are built
+            // ahead of the active one and sit in view above it, and their canal
+            // is revealed by their OWN progressPx — so without this the farm
+            // above the player's showed an empty strip where its channel runs
+            // until the moment it became active.
+            this._showBuiltCanal(this.tunnel);
+        }
     }
 
     // ── Lily pads ────────────────────────────────────────────────────────────
@@ -8186,6 +8875,75 @@ console.log(
         return sum > 0 ? cost / sum : 1;
     }
 
+    // The canal, whole, from the first frame. The dry main-canal tiles are
+    // revealed by progressPx — the distance the blade had travelled — so
+    // pinning it at the full length shows a finished channel and leaves every
+    // downstream reader working off the number it already reads.
+    _showBuiltCanal(tn) {
+        if (!tn) return;
+        tn.progressPx = tn.digLen || tn.len;
+        if (tn.canalShown) return;
+        tn.canalShown = true;
+        // The reveal mask hid everything the machine had not reached yet. There
+        // is no machine, so it is opened once, across the whole band.
+        if (tn.maskShape) {
+            tn.maskShape.clear().fillStyle(0xffffff, 1)
+                .fillRect(0, tn.exitY - 2, this.scale.width, tn.len + 4);
+        }
+    }
+
+    // Is this game about hammering blocks rather than digging?
+    _blockMode() {
+        return ((CONFIG.ROAD.TILEMAP || {}).BLOCKS || {}).ENABLED !== false;
+    }
+
+    // How far up the canal the water may come: the foot of the lowest block
+    // still standing, or the whole length once they are all broken.
+    //
+    // Measured the same way as tn.wet and tn.progressPx — pixels above the
+    // dig's start line, which is the grid's bottom edge — so it can be handed
+    // straight to _advanceWater as its limit with no conversion.
+    _blockWaterLimit(tn) {
+        const g = (tn.flood && tn.flood.g) || this.tileGrid;
+        const seg = tn.flood && tn.flood.seg;
+        if (!g) return tn.len;
+        const b = this._holdingBlock(seg);
+        if (!b) return tn.len;                  // nothing left holding it
+        const BK = CONFIG.ROAD.TILEMAP.BLOCKS || {};
+        // THE MARKER IS THE WATERLINE. It is also the slab's pivot (BLOCKS
+        // .ORIGIN_Y), so the water stops at exactly the point the art is hung
+        // from and the two cannot drift apart — redraw the slab taller, shorter
+        // or with a deeper shadow and the water still meets it in the same
+        // place. STOP_GAP is normally 0 and exists only to pull the water off
+        // the slab on purpose.
+        const gap = (BK.STOP_GAP || 0) * g.tile;
+        return Math.max(0, (g.rows - b.row) * g.tile - gap);
+    }
+
+    // The whole of block mode's per-frame work. Short, because the canal being
+    // finished removes most of what the machine's update was doing: no dig, no
+    // hardness, no strain, no spoil, no belt.
+    _updateCanalWater(tn, dt, time) {
+        const g = (tn.flood && tn.flood.g) || this.tileGrid;
+
+        // THE CHANNEL IS WHOLE, from the first frame. The dry main-canal tiles
+        // are revealed by progressPx, so pinning it at the full length shows the
+        // built canal and keeps every downstream reader (the flood's dryP, the
+        // bridges, the bank streaks) working off the number it already reads.
+        this._showBuiltCanal(tn);
+
+        this._checkBridges(tn);
+        this._advanceWater(tn, dt, time, this._blockWaterLimit(tn));
+
+        // DONE when the last block is gone and the water has run out the top.
+        if (!tn.done && this._blocksCleared(tn.flood && tn.flood.seg) &&
+            tn.wet >= tn.len - 0.5) {
+            tn.done = true;
+            if (tn.foam) tn.foam.clear();
+            this._finishStretch(tn);
+        }
+    }
+
     // Advance the blade while it owes banked distance. Reveal = growing the
     // mask rect; rotation = scrolling the helix texture. Both stop dead the
     // moment the banked distance is spent — an idle drill doesn't spin.
@@ -8195,6 +8953,23 @@ console.log(
         const dt = tn.lastTime ? Math.min((time - tn.lastTime) / 1000, 0.05) : 0;
         tn.lastTime = time;
         if (dt <= 0) return;
+
+        // ── BLOCK MODE ───────────────────────────────────────────────────
+        // THE CANAL IS ALREADY CUT. Nothing digs, nothing is revealed by a
+        // blade, and no power is spent on travel. The water rises up a finished
+        // channel and stops at the lowest block still standing; breaking that
+        // block moves the limit up to the next one, and breaking the last lets
+        // it run to the top, which is what finishes the level.
+        //
+        // Everything below this line is the trencher, left whole and dormant.
+        // It is not dead code kept out of sentiment: FOLLOW and DAM are two
+        // complete regimes that were switched between while the game was tuned,
+        // and this is a third. Turn BLOCKS.ENABLED off and the machine digs
+        // again exactly as it did.
+        if (this._blockMode()) {
+            this._updateCanalWater(tn, dt, time);
+            return;
+        }
 
         // Cracks in the grass ahead of the blade — while there's still dig left.
         this._drawAugerCrack(tn, time);
@@ -9261,6 +10036,34 @@ console.log(
     // runs its replacement is already standing at the next cut, and two rigs
     // dissolving into each other reads worse than a clean handover. The sprites
     // stay in the segment's registry, so its teardown destroys them properly.
+    // Put the machine away. Block mode has nothing for it to do, and a
+    // trencher parked in a finished canal reads as a bug.
+    _hideTrencher(tn) {
+        if (!tn) return;
+        for (const part of [tn.bore, tn.crack, tn.workLabel]) {
+            if (!part) continue;
+            if (Array.isArray(part)) { for (const p of part) if (p) p.setVisible(false); }
+            else if (part.setVisible) part.setVisible(false);
+            else if (part.clear) part.clear();
+        }
+        // The bore is a container of sprites on some paths and a bag of parts on
+        // others; either way nothing of it should draw.
+        if (tn.bore && typeof tn.bore === 'object') {
+            for (const k of Object.keys(tn.bore)) {
+                const o = tn.bore[k];
+                if (o && o.setVisible) o.setVisible(false);
+            }
+        }
+        // The spoil emitters keep running otherwise, throwing soil out of ground
+        // nothing is cutting.
+        if (tn.spoil) {
+            for (const e of (Array.isArray(tn.spoil) ? tn.spoil : [tn.spoil])) {
+                if (e && e.stop) e.stop();
+                if (e && e.setVisible) e.setVisible(false);
+            }
+        }
+    }
+
     _retireBore(seg) {
         const b = seg && seg.tunnel && seg.tunnel.bore;
         if (!b) return;
@@ -9270,6 +10073,14 @@ console.log(
     // Bring a level's machine back onto the board — the mirror of _retireBore,
     // used when a level built ahead becomes the live one.
     _showBore(seg) {
+        // THERE IS NO MACHINE IN BLOCK MODE. createTunnel hides the rig when the
+        // level is built, but the handover to the next level calls this to bring
+        // the machine forward — so from level 2 on it was being put straight
+        // back on screen, standing in a canal nothing had dug.
+        //
+        // Guarded HERE rather than at the call site: this is the one door the
+        // rig can come back through, and a future caller would reopen the bug.
+        if (this._blockMode()) return;
         const b = seg && seg.tunnel && seg.tunnel.bore;
         if (!b) return;
         for (const o of [b.belt, b.ctrl, b.shadow, b.cutEdge]) if (o) o.setVisible(true);
@@ -9453,7 +10264,8 @@ console.log(
             .setDepth(10)
             .setInteractive({ draggable: true, useHandCursor: true });
 
-        const batterySprite = this.add.image(p.slotX, p.slotY + yOff, `battery${batteryIconLevel}`);
+        const batterySprite = this.add.image(p.slotX, p.slotY + yOff,
+            HAMMER_SHEET.KEY, getHammerFrame(batteryIconLevel));
         batterySprite.setDisplaySize(this.slotBatterySize, this.slotBatterySize);
         batterySprite.setDepth(11);
 
@@ -9800,7 +10612,7 @@ console.log(
             const scaledBattSize = Math.round(U.BATTERY_ICON_SIZE * (Lc.cellSize / CONFIG.CELL.SIZE));
             this.unlockDisplayBatteryIcon = this.add.image(
                 curX + scaledBattSize / 2, 0,
-                `battery${getBatteryIconLevel(CONFIG.BATTERY_START_LEVEL)}`)
+                HAMMER_SHEET.KEY, getHammerFrame(CONFIG.BATTERY_START_LEVEL))
                 .setDisplaySize(scaledBattSize, scaledBattSize);
             elems.push(this.unlockDisplayBatteryIcon);
             curX += scaledBattSize + Math.max(3, Math.round(U.BATTERY_TEXT_SPACING * (Lc.cellSize / CONFIG.CELL.SIZE)));
@@ -9822,11 +10634,11 @@ console.log(
 
     updateBatteryUnlockDisplay(batteryLevel) {
         if (!this.unlockDisplayContainer || !this.unlockDisplayText) return;
-        const bd = getBatteryData(batteryLevel);
+        const bd = getHammerData(batteryLevel);
         if (!bd || !bd.displayName) return;
-        this.unlockDisplayText.setText(`${bd.displayName} Battery`);
+        this.unlockDisplayText.setText(bd.displayName);
         if (CONFIG.BATTERY_UNLOCK_DISPLAY.SHOW_BATTERY_ICON && this.unlockDisplayBatteryIcon) {
-            this.unlockDisplayBatteryIcon.setTexture(`battery${getBatteryIconLevel(batteryLevel)}`);
+            this.unlockDisplayBatteryIcon.setTexture(HAMMER_SHEET.KEY, getHammerFrame(batteryLevel));
         }
         this.highestUnlockedBatteryLevel = batteryLevel;
     }
@@ -9849,7 +10661,8 @@ console.log(
             .setDepth(10)
             .setInteractive({ draggable: true, useHandCursor: true });
 
-        const battery = this.add.image(cell.x, cell.y + this.batteryYOffset, `battery${iconLvl}`)
+        const battery = this.add.image(cell.x, cell.y + this.batteryYOffset,
+            HAMMER_SHEET.KEY, getHammerFrame(iconLvl))
             .setDisplaySize(this.batteryDisplaySize, this.batteryDisplaySize)
             .setDepth(11);
 
@@ -10011,7 +10824,8 @@ console.log(
         // Wait for battery texture then add icon
         const iconLvl = getBatteryIconLevel(this.spawnButtonLevel);
         await this.assets.ensureBattery(iconLvl);
-        const spawnIcon = this.add.image(L.spawnBattIconX, 0, `battery${iconLvl}`)
+        const spawnIcon = this.add.image(L.spawnBattIconX, 0,
+            HAMMER_SHEET.KEY, getHammerFrame(iconLvl))
             .setDisplaySize(L.spawnBattIconSize, L.spawnBattIconSize);
         spawnBtn.add(spawnIcon);
         this.spawnButtonIcon = spawnIcon;
@@ -10220,7 +11034,7 @@ console.log(
                 const iconLvl = getBatteryIconLevel(nl);
                 await this.assets.ensureBattery(iconLvl);
                 if (this.spawnButtonIcon) {
-                    this.spawnButtonIcon.setTexture(`battery${iconLvl}`);
+                    this.spawnButtonIcon.setTexture(HAMMER_SHEET.KEY, getHammerFrame(iconLvl));
                 }
             }
         }
@@ -10609,7 +11423,7 @@ console.log(
             if (bd.inGrid) {
                 bd.level += 1;
                 bd.levelText.setText(`LVL ${bd.level}`);
-                bd.sprite.setTexture(`battery${getBatteryIconLevel(bd.level)}`);
+                bd.sprite.setTexture(HAMMER_SHEET.KEY, getHammerFrame(bd.level));
                 if (bd.level > this.highestBatteryLevel) this.highestBatteryLevel = bd.level;
             }
         }
@@ -10620,7 +11434,7 @@ console.log(
                 slot.level += 1;
                 slot.chargePerMinute = getBatteryChargeValue(slot.level);
                 if (slot.batteryData) slot.batteryData.level = slot.level;
-                if (p.batterySprite)    p.batterySprite.setTexture(`battery${getBatteryIconLevel(slot.level)}`);
+                if (p.batterySprite)    p.batterySprite.setTexture(HAMMER_SHEET.KEY, getHammerFrame(slot.level));
                 if (p.batteryLevelText) p.batteryLevelText.setText(`LVL ${slot.level}`);
                 p.chargeRateText.setText(`${slot.chargePerMinute}`);
             }
@@ -10721,6 +11535,7 @@ console.log(
         this._updateSway(delta || 16);
         this._updateGraze(delta || 16);
         this._updateAnimals(delta || 16);
+        this._updateBlocks(delta || 16);
         this._updateHerd(delta || 16);
     }
 }
