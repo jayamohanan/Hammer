@@ -1,0 +1,53 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<link rel="icon" type="image/png" href="/favicon.png">
+
+	<title>Overcharge!</title>
+	<style>
+		/* Self-hosted so the build has no runtime dependency on a font CDN.
+		   `block` rather than `swap`: Phaser draws text into a canvas texture
+		   once and never re-renders it, so a fallback shown for even a moment
+		   gets BAKED IN and only a page refresh clears it. Waiting is correct
+		   here in a way it would not be for ordinary HTML. */
+		@font-face {
+			font-family: 'Baloo 2';
+			src: url('fonts/Baloo2-600.woff2') format('woff2');
+			font-weight: 600;
+			font-style: normal;
+			font-display: block;
+		}
+		* {
+			margin: 0;
+			padding: 0;
+			box-sizing: border-box;
+		} 
+		html, body {
+			width: 100%;
+			height: 100%;
+			overflow: hidden;
+			background: linear-gradient(to bottom, hsl(207, 100%, 70%), hsl(204, 100%, 80%));
+		}
+		#game-container {
+			width: 100%;
+			height: 100%;
+		}
+		canvas {
+			display: block;
+		}
+	</style>	
+</head>
+<body>
+	<div id="game-container"></div>
+	<div id="loading-indicator" style="position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); color: #333; font-family: Arial; font-size: 18px; z-index: 1000;">
+		Checking battery ̀assets...
+	</div>
+	<script src="phaser.min.js"></script>
+	<script src="batteryChargeData.js"></script>
+	<script src="levels.js"></script>
+	<script src="config.js"></script>
+	<script type="module" src="game.js"></script>
+</html>

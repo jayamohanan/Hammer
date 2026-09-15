@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<link rel="icon" type="image/png" href="/favicon.png">
+
+	<title>Level Editor - EMOJI INPUT</title>
+	<style>
+		* {
+			margin: 0;
+			padding: 0;
+			box-sizing: border-box;
+		} 
+		html, body {
+			width: 100%;
+			height: 100%;
+			overflow: hidden;
+			background: linear-gradient(to bottom, #d3e8eeff, #ABE0F0);
+		}
+		#game-container {
+			width: 100%;
+			height: 100%;
+		}
+		canvas {
+			display: block;
+		}
+	</style>
+</head>
+<body>
+	<div id="game-container"></div>
+	<div id="loading-indicator" style="position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); color: #333; font-family: Arial; font-size: 18px; z-index: 1000;">
+		Loading Level Editor...
+	</div>
+	<script src="../phaser.min.js"></script>
+	<script src="../config.js"></script>
+	<script src="LevelEditorScene.js"></script>
+	<script>
+		// Level Editor specific config
+		const editorConfig = {
+			type: Phaser.AUTO,
+			parent: 'game-container',
+			backgroundColor: '#EEF5F8',
+			scene: [LevelEditorScene],
+			
+			scale: {
+				mode: Phaser.Scale.FIT,
+				autoCenter: Phaser.Scale.CENTER_BOTH,
+				width: 720,
+				height: 1280,
+				resolution: window.devicePixelRatio || 1,
+			},
+
+			render: {
+				antialias: true,
+				pixelArt: false,
+			},
+		};
+
+		// Hide loading indicator and start editor
+		document.addEventListener('DOMContentLoaded', () => {
+			const loadingIndicator = document.getElementById('loading-indicator');
+			if (loadingIndicator) {
+				loadingIndicator.style.display = 'none';
+			}
+			const game = new Phaser.Game(editorConfig);
+		});
+	</script>
+</body>
+</html>
